@@ -308,12 +308,13 @@
   </div>
 </section>
 
+    
 <section class="hero teaser">
   <div class="container is-max-desktop">
     <div class="hero-body">
-      <img src="static/images/teaser_new_00.png" alt="MY ALT TEXT"/>
+      <img src="static/images/comparsion_00.png" alt="MY ALT TEXT"/>
       <h2 class="subtitle has-text-centered">
-      Results demonstrate the practicality and generalizability of Script across various reference style images, characters, and prompts.
+       Comparison of different token pruning methods. Attention-based and similarity-based methods prune tokens using attention scores and similarity scores, respectively. In contrast, divergence-based methods detect changes in model performance and retain tokens that cause minimal impact. Script (Graph-Structured and Query-Conditioned Token Pruning) combines graph-structured reduction of visual redundancy and query-conditioned semantic token selection to enable efficient pruning in MLLMs. In this example, Script successfully preserves key visual cues, such as the silver pot on the stove, the pineapple beside the limes, and the flowers on the table. Other methods fail to retain consistently.
       </h2>
     </div>
   </div>
@@ -357,7 +358,8 @@
       </div>
     </div>
   </div>
-  
+
+
 <!-- Image carousel -->
 <section class="hero is-small">
   <div class="hero-body">
@@ -365,24 +367,17 @@
       <div id="results-carousel" class="carousel results-carousel">
        <div class="item">
         <!-- TODO: Replace with your research result images -->
-        <img src="static/images/comparsion_00.png" alt="First research result visualization" loading="lazy"/>
+        <img src="static/images/radar_00.png" alt="Second research result visualization" loading="lazy"/>
         <!-- TODO: Replace with description of this result -->
         <h2 class="subtitle has-text-centered">
-       Comparison of different token pruning methods. Attention-based and similarity-based methods prune tokens using attention scores and similarity scores, respectively. In contrast, divergence-based methods detect changes in model performance and retain tokens that cause minimal impact. Script (Graph-Structured and Query-Conditioned Token Pruning) combines graph-structured reduction of visual redundancy and query-conditioned semantic token selection to enable efficient pruning in MLLMs. In this example, Script successfully preserves key visual cues, such as the silver pot on the stove, the pineapple beside the limes, and the flowers on the table. Other methods fail to retain consistently.
-      </h2>
+         (a) Efficiency Analysis on LLaVA-NeXT-7B under 88.9\% reduction. (b) Comparison with other baselines on LLaVA-1.5-7B under 94.4\% reduction.
+        </h2>
       </div>
       <div class="item">
         <!-- Your image here -->
-        <img src="static/images/radar_00.png" alt="Second research result visualization" loading="lazy"/>
-        <h2 class="subtitle has-text-centered">
-       (a) Efficiency Analysis on LLaVA-NeXT-7B under 88.9\% reduction. (b) Comparison with other baselines on LLaVA-1.5-7B under 94.4\% reduction.
-        </h2>
-      </div>
-        <div class="item">
-        <!-- Your image here -->
         <img src="static/images/analysis_00.png" alt="Second research result visualization" loading="lazy"/>
         <h2 class="subtitle has-text-centered">
-       Token redundancy visualized via similarity and entropy on 10,000 COCO images.
+         Token redundancy visualized via similarity and entropy on 10,000 COCO images.
         </h2>
       </div>
   </div>
@@ -390,6 +385,7 @@
 </div>
 </section>
 <!-- End image carousel -->
+
 
 
 
