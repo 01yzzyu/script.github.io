@@ -11,8 +11,8 @@ The rapid growth of visual tokens in multimodal large language models (MLLMs) le
 
 1. Clone this repository.
 ```bash
-git clone https://github.com/Theia-4869/script.git
-cd script
+https://github.com/01yzzyu/script.github.io.git
+cd Script
 ```
 
 2. Install necessary packages.
