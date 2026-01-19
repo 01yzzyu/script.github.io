@@ -1,80 +1,72 @@
-# Academic Project Page Template
+# Script: Graph-Structured and Query-Conditioned Semantic Token Pruning for Multimodal Large Language Models
+[📄 [Paper](https://openreview.net/forum?id=F6xKzbgcHq)] [🎞️ [Project Page](https://01yzzyu.github.io/script.github.io/)]
 
-> **Update (September 2025)**: This template has been modernized with better design, SEO, and mobile support. For the original version, see the [original-version branch](https://github.com/eliahuhorwitz/Academic-project-page-template/tree/original-version).
+## 👁️ Overview
 
-A clean, responsive template for academic project pages.
+The rapid growth of visual tokens in multimodal large language models (MLLMs) leads to excessive memory consumption and inference latency, especially when handling high-resolution images and videos. Token pruning is a technique used to mitigate this issue by removing redundancy, but existing methods often ignore relevance to the user query or suffer from the limitations of attention mechanisms, reducing their adaptability and effectiveness. To address these challenges, we propose Script, a plug-and-play pruning method that requires no retraining and generalizes across diverse MLLMs. Script comprises two modules: a graph-structured pruning module that removes visually redundant tokens, and a query-conditioned semantic pruning module that preserves query-relevant visual information. Together, they enhance performance on multimodal tasks. Experiments on fourteen benchmarks across image and video understanding tasks show that Script consistently achieves higher model efficiency and predictive accuracy compared to existing pruning methods. On LLaVA-NeXT-7B, it achieves up to 6.8x prefill speedup and 10x FLOP reduction, while retaining 96.88\% of the original performance.
 
+## ⚙️ Setup
 
-Example project pages built using this template are:
-- https://horwitz.ai/probex
-- https://vision.huji.ac.il/probegen
-- https://horwitz.ai/mother
-- https://horwitz.ai/spectral_detuning
-- https://vision.huji.ac.il/ladeda
-- https://vision.huji.ac.il/dsire
-- https://horwitz.ai/podd
-- https://dreamix-video-editing.github.io
-- https://horwitz.ai/conffusion
-- https://horwitz.ai/3d_ads/
-- https://vision.huji.ac.il/ssrl_ad
-- https://vision.huji.ac.il/deepsim
+### 🏝️ Environment
 
+1. Clone this repository.
+```bash
+https://github.com/01yzzyu/script.github.io.git
+cd Script
+```
 
+2. Install necessary packages.
+```bash
+conda create -n script python=3.10 -y
+conda activate script
+pip install -e .
+```
 
-## Start using the template
-To start using the template click on `Use this Template`.
+3. (Optional) Install FlashAttention for further inference acceleration.
+```bash
+pip install flash-attn --no-build-isolation
+```
 
-The template uses html for controlling the content and css for controlling the style. 
-To edit the websites contents edit the `index.html` file. It contains different HTML "building blocks", use whichever ones you need and comment out the rest.  
+### 📦️ Model
 
-**IMPORTANT!** Make sure to replace the `favicon.ico` under `static/images/` with one of your own, otherwise your favicon is going to be a dreambooth image of me.
+Download corresponding [LLaVA](https://github.com/haotian-liu/LLaVA/blob/main/docs/MODEL_ZOO.md) checkpoints from [Hugging Face](https://huggingface.co/liuhaotian) 🤗:
 
-## What's New
+| Version | LLM | Checkpoint |
+|----------|:----------:|:-----------:|
+| LLaVA-1.5 | Vicuna-7B | [liuhaotian/llava-v1.5-7b](https://huggingface.co/liuhaotian/llava-v1.5-7b) |
+| LLaVA-1.5 | Vicuna-13B | [liuhaotian/llava-v1.5-13b](https://huggingface.co/liuhaotian/llava-v1.5-13b) |
+| LLaVA-1.6 (LLaVA-NeXT) | Vicuna-7B | [liuhaotian/llava-v1.6-vicuna-7b](https://huggingface.co/liuhaotian/llava-v1.6-vicuna-7b) |
+| LLaVA-1.6 (LLaVA-NeXT) | Vicuna-13B | [liuhaotian/llava-v1.6-vicuna-13b](https://huggingface.co/liuhaotian/llava-v1.6-vicuna-13b) |
 
-- Modern, clean design with better mobile support
-- Improved SEO with proper meta tags and structured data
-- Performance improvements (lazy loading, optimized assets)
-- More Works dropdown
-- Copy button for BibTeX citations
-- Better accessibility
+### 📊 Data
 
-## Components
+Download each dataset according to [EVAL.md](EVAL.md).
 
-- Teaser video
-- Image carousel
-- YouTube video embedding
-- Video carousel
-- PDF poster viewer
-- BibTeX citation
+## 📋️ Evaluation
 
-## Customization
+The main implementation of script is highlighted with `script` annotations, mainly in [`llava_llama.py`](llava/model/language_model/llava_llama.py#L51), [`llava_arch.py`](llava/model/llava_arch.py#L140) and [`clip_encoder.py`](llava/model/multimodal_encoder/clip_encoder.py#L42).
 
-The HTML file has TODO comments showing what to replace:
+We provide the evaluation scripts for each benchmark; you only need to set the remaining visual token number as the bash argument. For example, if you want to evaluate script with 128 visual tokens retained on the GQA benchmark, you can run the following command with the argument `128`:
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 bash scripts/v1_5/eval/gqa.sh 128
+```
 
-- Paper title, authors, institution, conference
-- Links (arXiv, GitHub, etc.)
-- Abstract and descriptions  
-- Videos, images, and PDFs
-- Related works in the dropdown
-- Meta tags for SEO and social sharing
+And if you want to evaluate the script with 64 visual tokens retained on the MME benchmark, you can run the following command:
+```bash
+CUDA_VISIBLE_DEVICES=0 bash scripts/v1_5/eval/mme.sh 64
+```
 
-### Meta Tags
-The template includes meta tags for better search engine visibility and social media sharing. These appear in the `<head>` section and help with:
-- Google Scholar indexing
-- Social media previews (Twitter, Facebook, LinkedIn)
-- Search engine optimization
+For evaluation with the 13B LLM, you just need to replace the `CKPT` argument from `llava-v1.5-7b` to `llava-v1.5-13b` in each script. And for evaluation with LLaVA-NeXT, you can use the scripts in `./scripts/v1_6/eval`. For example, if you want to evaluate script with 32 * 5 = 320 visual tokens retained on the TextVQA benchmark, you can run the following command:
+```bash
+CUDA_VISIBLE_DEVICES=0 bash scripts/v1_6/eval/textvqa.sh 32
+```
 
-Create a 1200x630px social preview image at `static/images/social_preview.png`.
+The detailed guidance for evaluation commands and online submission of each benchmark can be found in [EVAL.md](EVAL.md).
 
-## Tips
+## 🎟️ License
 
-- Compress images with [TinyPNG](https://tinypng.com)
-- Use YouTube for large videos (>10MB)  
-- Replace the favicon in `static/images/`
-- Works with GitHub Pages
+This project is released under the [Apache 2.0 license](LICENSE).
 
-## Acknowledgments
-Parts of this project page were adopted from the [Nerfies](https://nerfies.github.io/) page.
+## 🎉 Acknowledgement
 
-## Website License
-<a rel="license" href="http://creativecommons.org/licenses/by-sa/4.0/"><img alt="Creative Commons License" style="border-width:0" src="https://i.creativecommons.org/l/by-sa/4.0/88x31.png" /></a><br />This work is licensed under a <a rel="license" href="http://creativecommons.org/licenses/by-sa/4.0/">Creative Commons Attribution-ShareAlike 4.0 International License</a>.
+We appreciate the open-source efforts of [LLaVA](https://github.com/haotian-liu/LLaVA), [Fast-MAP-DPP](https://github.com/laming-chen/fast-map-dpp) and [TRIM](https://github.com/FreedomIntelligence/TRIM).
