@@ -16,6 +16,8 @@
 from abc import ABC, abstractmethod
 
 import torch
+import torch.nn.functional as F
+import torch
 import torch.nn as nn
 
 from .multimodal_encoder.builder import build_vision_tower
@@ -129,7 +131,6 @@ def unpad_image(tensor, original_size):
 
 
 class LlavaMetaForCausalLM(ABC):
-
     @abstractmethod
     def get_model(self):
         pass
@@ -137,56 +138,243 @@ class LlavaMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
 
-    # [script] Generate index masks using conditional DPP
+    def token_merging(self, image_features, index_mask, scaling=1.0):
+        B, N, D = image_features.shape
+        device = image_features.device
+
+        token_counts = index_mask.sum(dim=1)  # shape (B,)
+        all_same = (token_counts == token_counts[0]).all()
+
+        retained_tokens = []
+        non_retained_tokens = []
+
+        for b in range(B):
+            retained_tokens.append(image_features[b][index_mask[b]])      # (T_b, D)
+            non_retained_tokens.append(image_features[b][~index_mask[b]])  # (N - T_b, D)
+
+        if all_same:
+            # === ✅ 快路径：所有 retained token 数一致，可 batch stack ===
+            T = token_counts[0].item()
+
+            retained = torch.stack(retained_tokens, dim=0)       # (B, T, D)
+            non_retained = torch.stack(non_retained_tokens, dim=0)  # (B, N-T, D)
+
+            if non_retained.shape[1] == 0:
+                return retained
+
+            # 相似度计算
+            cosine_sim = F.cosine_similarity(
+                non_retained.unsqueeze(2),       # (B, N-T, 1, D)
+                retained.unsqueeze(1),           # (B, 1, T, D)
+                dim=-1                           # → (B, N-T, T)
+            )
+            nearest_idx = cosine_sim.argmax(dim=2)  # (B, N-T)
+
+            # 初始化合并结果
+            merged = retained * scaling
+            merge_count = torch.ones(B, T, 1, device=device, dtype=torch.float32) * scaling
+
+            # 执行 scatter_add_
+            merged.scatter_add_(
+                1,
+                nearest_idx.unsqueeze(-1).expand(-1, -1, D),
+                non_retained
+            )
+            merge_count.scatter_add_(
+                1,
+                nearest_idx.unsqueeze(-1),
+                torch.ones_like(non_retained[:, :, :1], dtype=torch.float32)
+            )
+
+            merged /= merge_count
+            return merged
+
+        else:
+            # === 🐢 慢路径：每个样本保留 token 数不同 ===
+            merged_batch = []
+
+            for b in range(B):
+                retained = retained_tokens[b]        # (T_b, D)
+                non_retained = non_retained_tokens[b]  # (N - T_b, D)
+
+                if non_retained.shape[0] == 0:
+                    merged_batch.append(retained)
+                    continue
+
+                sim = F.cosine_similarity(
+                    non_retained.unsqueeze(1),  # (N-T, 1, D)
+                    retained.unsqueeze(0),      # (1, T, D)
+                    dim=-1                     # → (N-T, T)
+                )
+                nearest_idx = sim.argmax(dim=1)  # (N-T,)
+
+                merged = retained * scaling
+                count = torch.ones(retained.shape[0], 1, device=device, dtype=torch.float32) * scaling
+
+                for i in range(non_retained.shape[0]):
+                    j = nearest_idx[i].item()
+                    merged[j] += non_retained[i]
+                    count[j] += 1
+
+                merged /= count
+                merged_batch.append(merged)
+
+            # pad 成统一长度
+            merged_padded = torch.nn.utils.rnn.pad_sequence(merged_batch, batch_first=True)
+            return merged_padded
+
     def encode_images(self, images, texts=None):
+        # Step 0: 提取图像特征、图像嵌入、文本嵌入
         image_features, image_embeds, text_embeds = self.get_model().get_vision_tower()(images, texts=texts)
-        
+
         B, N, C = image_features.shape
         device = image_features.device
-        index_masks = torch.ones(B, N, dtype=torch.bool, device=device)
-        
-        image_features = self.get_model().mm_projector(image_features)
-        
-        # [script] Calculate cosine similarity
-        image_normalized = image_features / image_features.norm(dim=-1, keepdim=True) # (B, N, D)
-        image_normalized = image_normalized.float() # (B, N, D)
-        similarity = torch.matmul(image_normalized, image_normalized.transpose(1, 2)) # (B, N, N)
 
-        # [script] Calculate query relevance
-        image_embeds = image_embeds / image_embeds.norm(dim=-1, keepdim=True) # (B, N, C)
-        text_embeds = text_embeds / text_embeds.norm(dim=-1, keepdim=True) # (M, C)
-        relevance = torch.matmul(image_embeds, text_embeds.t()) # (B, N, M)
-        relevance = (-relevance).mean(dim=-1) # (B, N)
-        relevance = (relevance - relevance.min() + 1e-6) / (relevance.max() - relevance.min()) # (B, N)
+        # Step 1: 映射图像特征至多模态空间（作为 patch feature / key）
+        image_features = self.get_model().mm_projector(image_features)  # (B, N, D)
+        key_features = F.normalize(image_features, dim=-1)  # (B, N, D)
 
-        # [script] Construct kernel matrix
-        # You can use an additional hyperparameter theta to control the influence of the relevance score.
-        # theta = 0.5
-        # alpha = theta / (2 * (1 - theta))
-        # relevance = torch.exp(alpha * relevance) # (B, N)
-        kernel = relevance.unsqueeze(2) * similarity * relevance.unsqueeze(1) # (B, N, N)
+        # Step 2: 图像 patch-patch 相似度
+        similarity = torch.bmm(key_features, key_features.transpose(1, 2))  # (B, N, N)
 
-        # [script] Fast MAP inference of conditional DPP
-        cis = torch.zeros((self.visual_token_num, B, N), device=device) # (T, B, N)
-        di2s = torch.diagonal(kernel, dim1=1, dim2=2).clone() # (B, N)
-        select_idx = torch.empty((self.visual_token_num, B), dtype=torch.long, device=device) # (T, B)
+        # === Step 3: 结构剪枝  ===
+        sim_threshold = 0.2
+        K = 4
+        gamma = 1.0
+
+        valid_mask = similarity >= sim_threshold              
+        valid_counts = valid_mask.sum(dim=-1)                
+        row_mask = valid_counts >= K                       
+
+        # === 冗余评分 score_candidate：结构连接越多、相似性越强，得分越高 ===
+        score_candidate = (similarity * valid_mask).sum(dim=-1) / valid_counts.clamp(min=1)
+        score_candidate = valid_counts * torch.exp(gamma * (score_candidate - sim_threshold))
+        score_alternative = similarity.sum(dim=-1) / similarity.size(-1)
+
+        # === 结构 mask 的权重引导 final_scores（可调）
+        final_scores = torch.where(
+            row_mask,                      # 若结构足够连通
+            score_candidate,              # 用主力得分
+            0.5 * score_candidate + 0.5 * score_alternative  # 否则稍微降权
+        )
+
+        keep_r = self.visual_token_num
+        sorted_indices = final_scores.argsort(dim=-1, descending=True)
+        keep_idx = sorted_indices[:, :keep_r]
+
+        index_masks = torch.zeros(B, N, dtype=torch.bool, device=device)
+        index_masks.scatter_(1, keep_idx, True)
+
+        # === Step 4: 文本引导剪枝（语义 relevance） ===
+        with torch.no_grad():
+            M = text_embeds.shape[0]
+            text_embeds_expanded = text_embeds.unsqueeze(0).expand(B, -1, -1)  # (B, M, D)
+
+            text_relevance = torch.bmm(text_embeds_expanded, image_embeds.transpose(1, 2))  # (B, M, N)
+            text_relevance = text_relevance.mean(dim=-1)  # (B, M)
+
+            text_relevance = (text_relevance - text_relevance.min(dim=1, keepdim=True)[0]) / (
+                text_relevance.max(dim=1, keepdim=True)[0] - text_relevance.min(dim=1, keepdim=True)[0] + 1e-6
+            )
+
+            T = max(1, int(0.5 * M))
+            topk_text_indices = torch.topk(text_relevance, T, dim=-1).indices  # (B, T)
+
+            selected_text_embeds = torch.stack([
+                text_embeds[topk_text_indices[b]] for b in range(B)
+            ], dim=0)  # (B, T, D)
+
+            # === Step 5: 语义引导 patch relevance ===
+            relevance = torch.bmm(image_embeds, selected_text_embeds.transpose(1, 2))  # (B, N, T)
+            relevance = (-relevance).mean(dim=-1)  # (B, N)
+            relevance = (relevance - relevance.min(dim=1, keepdim=True)[0]) / (
+                relevance.max(dim=1, keepdim=True)[0] - relevance.min(dim=1, keepdim=True)[0] + 1e-6
+            )
+
+        # === Step 6: 核矩阵（结构 × 语义）
+        kernel = relevance.unsqueeze(2) * similarity * relevance.unsqueeze(1)  # (B, N, N)
+
+        # === Step 7: Gram-Schmidt 正交选择
+        cis = torch.zeros((self.visual_token_num, B, N), device=device)
+        di2s = torch.diagonal(kernel, dim1=1, dim2=2).clone()  # (B, N)
+        select_idx = torch.empty((self.visual_token_num, B), dtype=torch.long, device=device)
+
         for i in range(self.visual_token_num):
-            j = torch.argmax(di2s, dim=-1)
+            j = torch.argmax(di2s, dim=-1)  # (B,)
             select_idx[i] = j
 
-            eis = (kernel[torch.arange(B), j] - torch.einsum('tb,tbn->bn', cis[:i, torch.arange(B), j], cis[:i])) \
-                / torch.sqrt(di2s[torch.arange(B), j]).unsqueeze(-1)
+            eis = (kernel[torch.arange(B), j] - torch.einsum('tb,tbn->bn', cis[:i, torch.arange(B), j], cis[:i])) / (
+                torch.sqrt(di2s[torch.arange(B), j]).unsqueeze(-1) + 1e-6
+            )
             cis[i, :, :] = eis
             di2s -= torch.square(eis)
             di2s[torch.arange(B), j] = -float('inf')
-        
-        select_idx = torch.sort(select_idx.t()).values # (B, T)
-        index_masks = torch.zeros(B, N, dtype=torch.bool, device=device)
-        index_masks.scatter_(1, select_idx, True)
-        
-        return image_features, index_masks
 
-    # [script] Prune visual tokens according to index masks
+        index_masks_gs = torch.zeros(B, N, dtype=torch.bool, device=device)
+        index_masks_gs.scatter_(1, torch.sort(select_idx.t()).values, True)
+
+        # === Step 7: DPP-based greedy MAP inference ===
+        selected_idx = torch.empty((self.visual_token_num, B), dtype=torch.long, device=device)
+        d_scores = torch.diagonal(kernel, dim1=1, dim2=2).clone()  # (B, N)
+        mask = torch.zeros_like(d_scores, dtype=torch.bool)  # (B, N)
+
+        for i in range(self.visual_token_num):
+            # Step 7.1: Select token with max unexplained variance
+            idx = torch.argmax(d_scores.masked_fill(mask, float('-inf')), dim=-1)  # (B,)
+            selected_idx[i] = idx
+            mask.scatter_(1, idx.unsqueeze(1), True)  # mark as selected
+
+            # Step 7.2: Update residual variance for remaining tokens
+            for b in range(B):
+                j = idx[b]  # selected index for batch b
+                if d_scores[b, j] <= 0:
+                    continue
+
+                # Compute projection term
+                proj = kernel[b, :, j].clone()  # (N,)
+                for t in range(i):
+                    prev = selected_idx[t, b]
+                    coeff = kernel[b, j, prev] / (d_scores[b, prev] + 1e-6)
+                    proj -= coeff * kernel[b, :, prev]
+
+                # Normalize by current variance
+                proj = proj / (torch.sqrt(d_scores[b, j]) + 1e-6)
+
+                # Update residuals
+                d_scores[b] -= proj ** 2
+                d_scores[b, j] = -float('inf')  # mask selected token
+
+        # === Step 8: 取交集 + 补全到固定 token 数 self.visual_token_num ===
+        # intersection_mask = index_masks & index_masks_gs  # (B, N)
+        # num_selected = intersection_mask.sum(dim=1)       # (B,)
+        # final_mask = intersection_mask.clone()
+        index_masks_dpp = torch.zeros(B, N, dtype=torch.bool, device=device)
+        index_masks_dpp.scatter_(1, torch.sort(selected_idx.t()).values, True)
+
+        intersection_mask = index_masks & index_masks_dpp  # DPP 替代 GS
+        num_selected = intersection_mask.sum(dim=1)       # (B,)
+        final_mask = intersection_mask.clone()
+
+        for b in range(B):
+            if num_selected[b] < self.visual_token_num:
+                dpp_available = index_masks_dpp[b] & (~intersection_mask[b])
+                candidate_indices = torch.nonzero(dpp_available, as_tuple=False).squeeze(1)
+                if candidate_indices.numel() == 0:
+                    continue
+                candidate_relevance = relevance[b, candidate_indices]
+                sorted_indices = candidate_indices[torch.argsort(candidate_relevance, descending=True)]
+                pad_indices = sorted_indices[:self.visual_token_num - num_selected[b]]
+                final_mask[b, pad_indices] = True
+
+
+
+        # === Step 9: 决策使用哪一种 index_masks
+        # return image_features, index_masks      # 使用冗余剪枝
+        # return image_features, index_masks_gs  # 使用 Gram-Schmidt
+        return image_features, final_mask      # 结构 + 语义交集 + 补全
+        # return image_features, index_masks_dpp   # ✅ 使用 DPP MAP 近似推理
+
+
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, position_ids, attention_mask, past_key_values, labels,
         images, image_sizes=None, texts=None
@@ -195,7 +383,6 @@ class LlavaMetaForCausalLM(ABC):
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
 
-        # [script] Prune visual tokens
         if type(images) is list or images.ndim == 5:
             if type(images) is list:
                 images = [x.unsqueeze(0) if x.ndim == 3 else x for x in images]
@@ -210,6 +397,7 @@ class LlavaMetaForCausalLM(ABC):
             if mm_patch_merge_type == 'flat':
                 image_features = [x.flatten(0, 1) for x in image_features]
                 index_masks = [x.flatten(0, 1) for x in index_masks]
+                # image_features = [self.token_merging(x.unsqueeze(0), m.unsqueeze(0)).squeeze(0) for x, m in zip(image_features, index_masks)]
                 image_features = [x[m] for x, m in zip(image_features, index_masks)]
             elif mm_patch_merge_type.startswith('spatial'):
                 new_image_features = []
@@ -272,6 +460,7 @@ class LlavaMetaForCausalLM(ABC):
                 raise ValueError(f"Unexpected mm_patch_merge_type: {self.config.mm_patch_merge_type}")
         else:
             image_features, index_masks = self.encode_images(images, texts=texts)
+            # image_features = self.token_merging(image_features, index_masks)
             image_features = image_features[index_masks].unsqueeze(0)
 
         # TODO: image start / end is not implemented here to support pretraining.
